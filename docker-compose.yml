@@ -7,8 +7,10 @@ services:
     environment:
       - TELEGRAM_BOT_TOKEN=
       - MONGO_URI=mongodb://mongo:27017/telegram_bot
+      - PROFILE_IMAGE_PATH=Profiles
     volumes:
       - ./telegram_bot.py:/usr/src/app/telegram_bot.py
+      - ./Profiles/:/usr/src/app/Profiles/
     depends_on:
       - mongo
 

@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 # Environment variables
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 MONGO_URI = os.getenv('MONGO_URI')
+PROFILE_IMAGE_PATH = os.getenv('PROFILE_IMAGE_PATH')
 
 # MongoDB setup
 client = MongoClient(MONGO_URI)
@@ -43,7 +44,7 @@ def register(update: Update, context: CallbackContext) -> int:
 def profile_picture(update: Update, context: CallbackContext) -> int:
     user = update.message.from_user
     photo_file = update.message.photo[-1].get_file()
-    photo_file.download(f'{user.id}_profile.jpg')
+    photo_file.download(f'{PROFILE_IMAGE_PATH}/{user.id}_profile.jpg')
 
     user_data = {
         'user_id': user.id,
