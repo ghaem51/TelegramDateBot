@@ -1,8 +1,8 @@
 import logging
 import os
-from pymongo import MongoClient
+from pymongo import MongoClient, GEO2D
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler, CallbackQueryHandler
 
 # Logging setup
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -18,8 +18,11 @@ db = client['telegram_bot']
 users_collection = db['users']
 conversations_collection = db['conversations']
 
+# Ensure location index for geo queries
+users_collection.create_index([("location", GEO2D)])
+
 # States for conversation handler
-PROFILE_PICTURE, SEX, BIRTHDAY, LOCATION = range(4)
+PROFILE_PICTURE, SEX, BIRTHDAY, LOCATION, PREFERRED_SEX, SEARCH_CRITERIA = range(6)
 
 def start(update: Update, context: CallbackContext) -> None:
     main_menu(update)
@@ -62,6 +65,19 @@ def sex(update: Update, context: CallbackContext) -> int:
         return SEX
 
     context.user_data['user_data']['sex'] = sex
+    # Ask for preferred sex with buttons
+    buttons = [[KeyboardButton("Male"), KeyboardButton("Female")]]
+    reply_markup = ReplyKeyboardMarkup(buttons, one_time_keyboard=True)
+    update.message.reply_text('Great! Now tell me the sex you are interested in:', reply_markup=reply_markup)
+    return PREFERRED_SEX
+
+def preferred_sex(update: Update, context: CallbackContext) -> int:
+    preferred_sex = update.message.text.lower()
+    if preferred_sex not in ['male', 'female']:
+        update.message.reply_text('Please select "Male" or "Female" using the buttons.')
+        return PREFERRED_SEX
+
+    context.user_data['user_data']['preferred_sex'] = preferred_sex
     update.message.reply_text('Great! Now send me your birthday (YYYY-MM-DD).', reply_markup=ReplyKeyboardRemove())
     return BIRTHDAY
 
@@ -77,10 +93,8 @@ def birthday(update: Update, context: CallbackContext) -> int:
 
 def location(update: Update, context: CallbackContext) -> int:
     user_location = update.message.location
-    context.user_data['user_data']['location'] = {
-        'latitude': user_location.latitude,
-        'longitude': user_location.longitude
-    }
+    context.user_data['user_data']['location'] = [user_location.longitude, user_location.latitude]
+    context.user_data['user_data']['active'] = True
 
     # Save user data to MongoDB
     users_collection.insert_one(context.user_data['user_data'])
@@ -88,44 +102,116 @@ def location(update: Update, context: CallbackContext) -> int:
     main_menu(update)
     return ConversationHandler.END
 
-def search(update: Update, context: CallbackContext) -> None:
+def search(update: Update, context: CallbackContext) -> int:
     user_id = update.message.from_user.id
     user = users_collection.find_one({'user_id': user_id})
 
     if not user:
         update.message.reply_text('You need to register first. Use the main menu to start.')
-        return
+        return ConversationHandler.END
 
-    buttons = [[KeyboardButton("Male"), KeyboardButton("Female")]]
+    buttons = [
+        [KeyboardButton("Near 1 km")],
+        [KeyboardButton("City")],
+        [KeyboardButton("Country")],
+        [KeyboardButton("Any")]
+    ]
     reply_markup = ReplyKeyboardMarkup(buttons, one_time_keyboard=True)
-    update.message.reply_text('Enter the sex of the person you are looking for:', reply_markup=reply_markup)
+    update.message.reply_text('Choose a search option:', reply_markup=reply_markup)
+    return SEARCH_CRITERIA
 
-def search_match(update: Update, context: CallbackContext) -> None:
+def search_criteria(update: Update, context: CallbackContext) -> int:
+    criteria = update.message.text.lower()
     user_id = update.message.from_user.id
-    sex = update.message.text.lower()  
-    if sex not in ['male', 'female']:
-        buttons = [[KeyboardButton("Male"), KeyboardButton("Female")]]
-        reply_markup = ReplyKeyboardMarkup(buttons, one_time_keyboard=True)
-        update.message.reply_text('Search  for "Male" or "Female"', reply_markup=reply_markup)
-        return
+    user = users_collection.find_one({'user_id': user_id})
+    user_location = user['location']
+    preferred_sex = user['preferred_sex']
 
-    matched_user = users_collection.find_one({'sex': sex})
+    matched_user = None
+
+    if criteria == "near 1 km":
+        matched_user = find_near_1km(user_location, preferred_sex, user_id)
+    elif criteria == "city":
+        matched_user = find_by_city(user_location, preferred_sex, user_id)
+    elif criteria == "country":
+        matched_user = find_by_country(user_location, preferred_sex, user_id)
+    else:
+        matched_user = find_any(preferred_sex, user_id)
 
     if matched_user:
-        conversation_data = {
-            'user1': user_id,
-            'user2': matched_user['user_id'],
-            'active': True
-        }
-        conversations_collection.insert_one(conversation_data)
-
-        update.message.reply_text(f'Matched with {matched_user["username"]}. You can start chatting now.')
-        context.bot.send_message(matched_user['user_id'], f'Matched with {user["username"]}. You can start chatting now.')
-
-        context.user_data['current_chat'] = matched_user['user_id']
+        start_conversation(context, user_id, matched_user)
     else:
-        update.message.reply_text('No match found.')
-    main_menu(update)
+        context.bot.send_message(chat_id=user_id, text='No active chat. Use the main menu to find a match.')
+        users_collection.update_one({'user_id': user_id}, {'$set': {'active': False}})
+        main_menu(update)
+
+    return ConversationHandler.END
+
+def find_near_1km(user_location: dict, preferred_sex: str, user_id: int) -> dict:
+    return users_collection.find_one({
+        'location': {
+            '$near': {
+                '$geometry': {
+                    'type': 'Point',
+                    'coordinates': user_location
+                },
+                '$maxDistance': 1000
+            }
+        },
+        'sex': preferred_sex,
+        'active': True,
+        'user_id': {'$ne': user_id}
+    })
+
+def find_by_city(user_location: dict, preferred_sex: str, user_id: int) -> dict:
+    user_city = users_collection.find_one({'user_id': user_id})['city']
+    return users_collection.find_one({
+        'city': user_city,
+        'sex': preferred_sex,
+        'active': True,
+        'user_id': {'$ne': user_id}
+    })
+
+def find_by_country(user_location: dict, preferred_sex: str, user_id: int) -> dict:
+    user_country = users_collection.find_one({'user_id': user_id})['country']
+    return users_collection.find_one({
+        'country': user_country,
+        'sex': preferred_sex,
+        'active': True,
+        'user_id': {'$ne': user_id}
+    })
+
+def find_any(preferred_sex: str, user_id: int) -> dict:
+    return users_collection.find_one({
+        'sex': preferred_sex,
+        'active': True,
+        'user_id': {'$ne': user_id}
+    })
+
+def start_conversation(context: CallbackContext, user_id: int, matched_user: dict) -> None:
+    conversations_collection.insert_one({
+        'user1': user_id,
+        'user2': matched_user['user_id'],
+        'active': True
+    })
+
+    users_collection.update_one({'user_id': user_id}, {'$set': {'active': False}})
+    users_collection.update_one({'user_id': matched_user['user_id']}, {'$set': {'active': False}})
+
+    context.bot.send_message(chat_id=user_id, text=f'Matched with {matched_user["username"]}. You can start chatting now.')
+    context.bot.send_message(chat_id=matched_user['user_id'], text=f'Matched with {users_collection.find_one({"user_id": user_id})["username"]}. You can start chatting now.')
+
+def view_profile(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    user_id = int(query.data.split(':')[1])
+    user = users_collection.find_one({'user_id': user_id})
+
+    profile_info = (
+        f"Username: {user['username']}\n"
+        f"Sex: {user['sex']}\n"
+        f"Birthday: {user['birthday']}"
+    )
+    query.message.reply_text(profile_info)
 
 def message_handler(update: Update, context: CallbackContext) -> None:
     user_id = update.message.from_user.id
@@ -138,7 +224,6 @@ def message_handler(update: Update, context: CallbackContext) -> None:
     else:
         update.message.reply_text('No active chat. Use the main menu to find a match.')
         main_menu(update)
-
 
 def disconnect(update: Update, context: CallbackContext) -> None:
     user_id = update.message.from_user.id
@@ -197,8 +282,10 @@ def main() -> None:
         states={
             PROFILE_PICTURE: [MessageHandler(Filters.photo, profile_picture)],
             SEX: [MessageHandler(Filters.text & ~Filters.command, sex)],
+            PREFERRED_SEX: [MessageHandler(Filters.text & ~Filters.command, preferred_sex)],
             BIRTHDAY: [MessageHandler(Filters.text & ~Filters.command, birthday)],
             LOCATION: [MessageHandler(Filters.location, location)],
+            SEARCH_CRITERIA: [MessageHandler(Filters.text & ~Filters.command, search_criteria)]
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
@@ -206,7 +293,8 @@ def main() -> None:
     dispatcher.add_handler(conv_handler)
     dispatcher.add_handler(CommandHandler('start', start))
     dispatcher.add_handler(CommandHandler('help', help_command))
-    dispatcher.add_handler(MessageHandler(Filters.regex('^(Search for Match)$'), search_match))
+    dispatcher.add_handler(CallbackQueryHandler(view_profile, pattern='view_profile'))
+    dispatcher.add_handler(MessageHandler(Filters.regex('^(Search for Match)$'), search))
     dispatcher.add_handler(MessageHandler(Filters.regex('^(Disconnect)$'), disconnect))
     dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, message_handler))
     dispatcher.add_handler(MessageHandler(Filters.regex('^(Register|Search for Match|Disconnect)$'), button_handler))
