@@ -49,7 +49,8 @@ def profile_picture(update: Update, context: CallbackContext) -> int:
     user_data = {
         'user_id': user.id,
         'username': user.username,
-        'profile_picture': f'{user.id}_profile.jpg'
+        'profile_picture': f'{user.id}_profile.jpg',
+        'active': True  # User is active upon registration
     }
     context.user_data['user_data'] = user_data
 
@@ -95,7 +96,6 @@ def birthday(update: Update, context: CallbackContext) -> int:
 def location(update: Update, context: CallbackContext) -> int:
     user_location = update.message.location
     context.user_data['user_data']['location'] = [user_location.longitude, user_location.latitude]
-    context.user_data['user_data']['active'] = True
 
     # Save user data to MongoDB
     users_collection.insert_one(context.user_data['user_data'])
@@ -142,8 +142,7 @@ def search_criteria(update: Update, context: CallbackContext) -> int:
     if matched_user:
         start_conversation(context, user_id, matched_user)
     else:
-        context.bot.send_message(chat_id=user_id, text='No active chat. Use the main menu to find a match.')
-        users_collection.update_one({'user_id': user_id}, {'$set': {'active': False}})
+        update.message.reply_text('No active chat. Use the main menu to find a match.')
         main_menu(update)
 
     return ConversationHandler.END
@@ -223,6 +222,7 @@ def message_handler(update: Update, context: CallbackContext) -> None:
         recipient_id = conversation['user2'] if conversation['user1'] == user_id else conversation['user1']
         context.bot.send_message(recipient_id, update.message.text)
     else:
+        logger.error(f'message_handler, No active chat for user {user_id}')
         update.message.reply_text('No active chat. Use the main menu to find a match.')
         main_menu(update)
 
@@ -297,8 +297,9 @@ def main() -> None:
     dispatcher.add_handler(CallbackQueryHandler(view_profile, pattern='view_profile'))
     dispatcher.add_handler(MessageHandler(Filters.regex('^(Search for Match)$'), search))
     dispatcher.add_handler(MessageHandler(Filters.regex('^(Disconnect)$'), disconnect))
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, message_handler))
+    dispatcher.add_handler(MessageHandler(Filters.regex('^(Any)$'), search_criteria))
     dispatcher.add_handler(MessageHandler(Filters.regex('^(Register|Search for Match|Disconnect)$'), button_handler))
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, message_handler))
 
     updater.start_polling()
     updater.idle()
