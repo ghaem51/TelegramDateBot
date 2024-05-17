@@ -5,9 +5,9 @@ services:
     build: .
     container_name: telegram_bot
     environment:
-      - TELEGRAM_BOT_TOKEN=
-      - MONGO_URI=mongodb://mongo:27017/telegram_bot
-      - PROFILE_IMAGE_PATH=Profiles
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - MONGO_URI=${MONGO_URI}
+      - PROFILE_IMAGE_PATH=${PROFILE_IMAGE_PATH}
     volumes:
       - ./telegram_bot.py:/usr/src/app/telegram_bot.py
       - ./Profiles/:/usr/src/app/Profiles/
