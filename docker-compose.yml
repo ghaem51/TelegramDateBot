@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: telegram_bot
+    environment:
+      - TELEGRAM_BOT_TOKEN=
+      - MONGO_URI=mongodb://mongo:27017/telegram_bot
+    volumes:
+      - ./telegram_bot.py:/usr/src/app/telegram_bot.py
+    depends_on:
+      - mongo
+
+  mongo:
+    image: mongo:4.4
+    container_name: mongodb
+    volumes:
+      - mongo_data:/data/db
+
+volumes:
+  mongo_data:
